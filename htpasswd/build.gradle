@@ -1,0 +1,59 @@
+def mainVersion = "1.2.0"
+Map<String, String> envMap = new HashMap<>(System.getenv())
+def imageRepository = envMap.getOrDefault("IMAGE_REPOSITORY ", "wangz2019/jiuying-htpasswd")
+def alpineRepo = envMap.getOrDefault("ALPINE_REPO", "mirrors.aliyun.com")
+String imageWithTag = "${imageRepository}:${mainVersion}"
+File runtimeDockerDirectory = project.file("${project.buildDir}/runtime/docker")
+
+String username = envMap.getOrDefault("username", "admin")
+String password = envMap.getOrDefault("password", "some-password")
+task buildDockerImage() {
+    doFirst {
+        runtimeDockerDirectory.mkdirs()
+        runtimeDockerDirectory.delete()
+        copy {
+            from project.file("docker")
+            into runtimeDockerDirectory
+        }
+    }
+    doLast {
+        exec {
+            commandLine(
+                    "docker", "build",
+                    "--rm",
+                    "-f", project.file("${runtimeDockerDirectory.getAbsolutePath()}/Dockerfile"),
+                    "-t", imageWithTag,
+                    "--build-arg", "ALPINE_REPO=${alpineRepo}",
+                    runtimeDockerDirectory,
+            )
+        }
+    }
+}
+
+task pushDockerImage() {
+    doLast {
+        exec {
+            commandLine(
+                    "docker", "buildx", "build",
+                    "--platform", "linux/amd64,linux/arm64,linux/arm/v7",
+                    "--rm",
+                    "-f", project.file("${runtimeDockerDirectory.getAbsolutePath()}/Dockerfile"),
+                    "-t", imageWithTag,
+                    "--push",
+                    runtimeDockerDirectory,
+            )
+        }
+    }
+    dependsOn(buildDockerImage)
+}
+
+task generatePassword() {
+    doLast {
+        exec {
+            def execSpec = commandLine("docker", "run", imageWithTag, username, password)
+            ignoreExitValue(true)
+            println("running command: ${String.join(" ", execSpec.getCommandLine())}")
+        }
+    }
+    dependsOn(buildDockerImage)
+}
