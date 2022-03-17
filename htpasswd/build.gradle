@@ -1,3 +1,11 @@
+import com.bmuschko.gradle.docker.tasks.container.*
+import com.bmuschko.gradle.docker.tasks.image.DockerBuildImage
+import com.bmuschko.gradle.docker.tasks.image.DockerPushImage
+
+plugins {
+    id "com.bmuschko.docker-remote-api" version "7.2.0"
+}
+
 def mainVersion = "1.2.0"
 Map<String, String> envMap = new HashMap<>(System.getenv())
 def imageRepository = envMap.getOrDefault("IMAGE_REPOSITORY ", "wangz2019/jiuying-htpasswd")
@@ -7,7 +15,7 @@ File runtimeDockerDirectory = project.file("${project.buildDir}/runtime/docker")
 
 String username = envMap.getOrDefault("username", "admin")
 String password = envMap.getOrDefault("password", "some-password")
-task buildDockerImage() {
+task buildDockerImage(type: DockerBuildImage) {
     doFirst {
         runtimeDockerDirectory.mkdirs()
         runtimeDockerDirectory.delete()
@@ -16,20 +24,19 @@ task buildDockerImage() {
             into runtimeDockerDirectory
         }
     }
-    doLast {
-        exec {
-            commandLine(
-                    "docker", "build",
-                    "--rm",
-                    "-f", project.file("${runtimeDockerDirectory.getAbsolutePath()}/Dockerfile"),
-                    "-t", imageWithTag,
-                    "--build-arg", "ALPINE_REPO=${alpineRepo}",
-                    runtimeDockerDirectory,
-            )
-        }
-    }
+    inputDir = runtimeDockerDirectory
+    dockerFile = project.file("${runtimeDockerDirectory.getAbsolutePath()}/Dockerfile")
+    images.add(imageWithTag)
+    remove = true
+    buildArgs.put("ALPINE_REPO", alpineRepo)
 }
 
+task pushDockerImageByGradlePlugin(type: DockerPushImage) {
+    images.add(imageWithTag)
+    dependsOn(buildDockerImage)
+}
+// TODO gradle-docker-plugin not support buildx according to
+// https://github.com/bmuschko/gradle-docker-plugin/issues/967
 task pushDockerImage() {
     doLast {
         exec {
@@ -47,13 +54,40 @@ task pushDockerImage() {
     dependsOn(buildDockerImage)
 }
 
-task generatePassword() {
-    doLast {
-        exec {
-            def execSpec = commandLine("docker", "run", imageWithTag, username, password)
-            ignoreExitValue(true)
-            println("running command: ${String.join(" ", execSpec.getCommandLine())}")
-        }
-    }
+task generateHtpasswd() {
     dependsOn(buildDockerImage)
+    doLast {
+        tasks.register("createContainer", DockerCreateContainer)
+        tasks.register("startContainer", DockerStartContainer)
+        tasks.register("waitContainer", DockerWaitContainer)
+        tasks.register("logsContainer", DockerLogsContainer)
+        tasks.register("removeContainer", DockerRemoveContainer)
+
+        DockerCreateContainer createTask = createContainer {
+            containerName = "generate-htpasswd"
+            imageId = imageWithTag
+            cmd.add(username)
+            cmd.add(password)
+            attachStdout = true
+            attachStderr = true
+            hostConfig.autoRemove = false
+        }
+        createTask.runRemoteCommand()
+        DockerStartContainer startTask = startContainer {
+            containerId = createTask.getContainerId()
+        }
+        startTask.runRemoteCommand()
+        DockerWaitContainer waitTask = waitContainer {
+            containerId = createTask.getContainerId()
+        }
+        waitTask.runRemoteCommand()
+        DockerLogsContainer logsTask = logsContainer {
+            containerId = createTask.getContainerId()
+        }
+        logsTask.runRemoteCommand()
+        DockerRemoveContainer remoteTask = removeContainer {
+            containerId = createTask.getContainerId()
+        }
+        remoteTask.runRemoteCommand()
+    }
 }
